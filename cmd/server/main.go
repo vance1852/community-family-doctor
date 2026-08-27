@@ -13,6 +13,7 @@ import (
 
 	"github.com/vance1852/community-family-doctor/internal/auth"
 	"github.com/vance1852/community-family-doctor/internal/config"
+	"github.com/vance1852/community-family-doctor/internal/domain"
 	"github.com/vance1852/community-family-doctor/internal/httpapi"
 	"github.com/vance1852/community-family-doctor/internal/incident"
 	"github.com/vance1852/community-family-doctor/internal/platform"
@@ -109,7 +110,13 @@ func run() error {
 		}
 		return fmt.Errorf("serve http: %w", err)
 	case err := <-workerError:
-		if errors.Is(err, context.Canceled) {
+		if errors.Is(err, domain.ErrShutdown) {
+			logger.Info("background workers stopped", "cause", context.Cause(ctx))
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
+			defer shutdownCancel()
+			if herr := server.Shutdown(shutdownCtx); herr != nil {
+				return fmt.Errorf("shutdown http server after worker stop: %w", herr)
+			}
 			return nil
 		}
 		return fmt.Errorf("run background workers: %w", err)

@@ -173,3 +173,31 @@ func (s *Store) FinishAlertJob(ctx context.Context, job domain.AlertJob, process
 	}
 	return nil
 }
+
+// ReleaseAlertJob returns a claimed alert job to the pending pool without
+// incrementing the attempt count. It is used when a job is interrupted by
+// context cancellation (for example a process shutdown) rather than failing
+// on its own merits, so the cancellation cause is not recorded against the
+// job's retry budget. A stale or expired lease (changed != 1) is ignored:
+// the job is already reclaimable or held by another owner.
+func (s *Store) ReleaseAlertJob(ctx context.Context, job domain.AlertJob, now time.Time) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE alert_jobs
+		SET status = 'pending', available_at = ?, lease_owner = NULL, lease_token = NULL,
+		    lease_expires_at = NULL, updated_at = ?
+		WHERE id = ? AND status = 'running' AND lease_owner = ?
+		  AND lease_token = ? AND lease_generation = ?`,
+		formatTime(now), formatTime(now),
+		job.ID, job.LeaseOwner, job.LeaseToken, job.LeaseGeneration)
+	if err != nil {
+		return fmt.Errorf("release alert job: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read alert release count: %w", err)
+	}
+	if changed != 1 {
+		return &domain.LeaseError{Resource: "alert job " + job.ID, Owner: job.LeaseOwner, Generation: job.LeaseGeneration}
+	}
+	return nil
+}

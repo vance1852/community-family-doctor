@@ -179,6 +179,32 @@ func (s *Store) FailOutboxEvent(ctx context.Context, event domain.OutboxEvent, c
 	return nil
 }
 
+// ReleaseOutboxEvent returns a claimed outbox event to the pending pool
+// without incrementing the attempt count. It is used when delivery is
+// interrupted by context cancellation (for example a process shutdown) so
+// the cancellation cause is not recorded against the event's retry budget.
+func (s *Store) ReleaseOutboxEvent(ctx context.Context, event domain.OutboxEvent, now time.Time) error {
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE outbox_events
+		SET status = 'pending', available_at = ?, lease_owner = NULL, lease_token = NULL,
+		    lease_expires_at = NULL, updated_at = ?
+		WHERE id = ? AND status = 'sending' AND lease_owner = ?
+		  AND lease_token = ? AND lease_generation = ?`,
+		formatTime(now), formatTime(now),
+		event.ID, event.LeaseOwner, event.LeaseToken, event.LeaseGeneration)
+	if err != nil {
+		return fmt.Errorf("release outbox event: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read outbox release count: %w", err)
+	}
+	if changed != 1 {
+		return &domain.LeaseError{Resource: "outbox event " + event.ID, Owner: event.LeaseOwner, Generation: event.LeaseGeneration}
+	}
+	return nil
+}
+
 func truncateError(err error) string {
 	if err == nil {
 		return "unknown error"

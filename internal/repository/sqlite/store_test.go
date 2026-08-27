@@ -314,3 +314,74 @@ func TestAlertJobFailureRetriesThenDies(t *testing.T) {
 		t.Fatalf("after final failure status=%s attempt=%d", status, attempt)
 	}
 }
+
+func TestReleaseAlertJobReturnsToPendingWithoutConsumingAttempt(t *testing.T) {
+	store := openTestStore(t)
+	seedOwnershipGraph(t, store)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	reading := domain.TelemetryReading{ID: "reading-release", OrganizationID: "org-1", StationID: "station-1", ExternalID: "external-release", Parameter: "turbidity", Value: 12, Unit: "NTU", Threshold: 5, ObservedAt: now, ReceivedAt: now}
+	if created, err := InsertTelemetryReading(ctx, store.DB(), reading); err != nil || !created {
+		t.Fatalf("reading created=%v err=%v", created, err)
+	}
+	job := domain.AlertJob{ID: "job-release", OrganizationID: "org-1", ReadingID: reading.ID, Status: domain.JobPending, MaxAttempts: 2, AvailableAt: now, CreatedAt: now, UpdatedAt: now}
+	if err := InsertAlertJob(ctx, store.DB(), job); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.ClaimAlertJob(ctx, "worker", "token-release", now, time.Minute)
+	if err != nil {
+		t.Fatalf("claim error = %v", err)
+	}
+	if err := store.ReleaseAlertJob(ctx, claimed, now); err != nil {
+		t.Fatalf("release error = %v", err)
+	}
+	var status string
+	var attempt int
+	if err := store.DB().QueryRow(`SELECT status, attempt_count FROM alert_jobs WHERE id = 'job-release'`).Scan(&status, &attempt); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" || attempt != 0 {
+		t.Fatalf("after release status=%s attempt=%d, want pending/0", status, attempt)
+	}
+	// The released job must be immediately reclaimable for recovery.
+	if _, err := store.ClaimAlertJob(ctx, "worker", "token-reclaim", now, time.Minute); err != nil {
+		t.Fatalf("reclaim after release error = %v", err)
+	}
+	// Releasing a stale lease is a lease-lost error, not a silent success.
+	stale := claimed
+	stale.LeaseToken = "wrong-token"
+	if err := store.ReleaseAlertJob(ctx, stale, now); !errors.Is(err, domain.ErrLeaseLost) {
+		t.Fatalf("stale release error = %v, want ErrLeaseLost", err)
+	}
+}
+
+func TestReleaseOutboxEventReturnsToPendingWithoutConsumingAttempt(t *testing.T) {
+	store := openTestStore(t)
+	seedOwnershipGraph(t, store)
+	ctx := context.Background()
+	now := time.Now().UTC()
+	event := domain.OutboxEvent{ID: "outbox-release", OrganizationID: "org-1", Topic: "incident.reported", AggregateType: "incident", AggregateID: "i1", IdempotencyKey: "key-release", Payload: []byte(`{}`), Status: domain.OutboxPending, MaxAttempts: 3, AvailableAt: now, CreatedAt: now, UpdatedAt: now}
+	if err := InsertOutboxEvent(ctx, store.DB(), event); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.ClaimOutboxEvent(ctx, "worker", "token-release", now, time.Minute)
+	if err != nil {
+		t.Fatalf("claim error = %v", err)
+	}
+	if err := store.ReleaseOutboxEvent(ctx, claimed, now); err != nil {
+		t.Fatalf("release error = %v", err)
+	}
+	var status string
+	var attempt int
+	if err := store.DB().QueryRow(`SELECT status, attempt_count FROM outbox_events WHERE id = 'outbox-release'`).Scan(&status, &attempt); err != nil {
+		t.Fatal(err)
+	}
+	if status != "pending" || attempt != 0 {
+		t.Fatalf("after release status=%s attempt=%d, want pending/0", status, attempt)
+	}
+	stale := claimed
+	stale.LeaseToken = "wrong-token"
+	if err := store.ReleaseOutboxEvent(ctx, stale, now); !errors.Is(err, domain.ErrLeaseLost) {
+		t.Fatalf("stale release error = %v, want ErrLeaseLost", err)
+	}
+}

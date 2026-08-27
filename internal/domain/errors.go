@@ -16,6 +16,7 @@ var (
 	ErrLeaseLost         = errors.New("resource lease lost")
 	ErrDependency        = errors.New("dependency unavailable")
 	ErrExpired           = errors.New("resource expired")
+	ErrShutdown          = errors.New("background worker shutdown")
 )
 
 type FieldViolation struct {
@@ -85,6 +86,27 @@ func (e *TransitionError) Error() string {
 }
 
 func (e *TransitionError) Unwrap() error { return ErrInvalidTransition }
+
+// ShutdownError carries the cancellation cause that stopped a background
+// worker. It wraps domain.ErrShutdown so callers can distinguish an expected
+// shutdown (for example from an OS signal) from an unexpected worker failure.
+type ShutdownError struct {
+	Cause error
+}
+
+func (e *ShutdownError) Error() string {
+	if e.Cause == nil {
+		return ErrShutdown.Error()
+	}
+	return fmt.Sprintf("%s: %v", ErrShutdown, e.Cause)
+}
+
+func (e *ShutdownError) Unwrap() error {
+	if e.Cause != nil {
+		return errors.Join(ErrShutdown, e.Cause)
+	}
+	return ErrShutdown
+}
 
 type LeaseError struct {
 	Resource   string

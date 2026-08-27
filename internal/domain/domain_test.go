@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"context"
 	"errors"
 	"math"
 	"testing"
@@ -253,10 +254,15 @@ func TestTypedErrorsPreserveClassification(t *testing.T) {
 		{&ConflictError{Resource: "sample", Key: "s1", Cause: errors.New("version")}, ErrConflict},
 		{&TransitionError{Entity: "sample", From: "a", To: "b", Reason: "no"}, ErrInvalidTransition},
 		{&LeaseError{Resource: "job", Owner: "w1", Generation: 2}, ErrLeaseLost},
+		{&ShutdownError{Cause: context.Canceled}, ErrShutdown},
+		{&ShutdownError{Cause: nil}, ErrShutdown},
 	}
 	for _, check := range checks {
 		if !errors.Is(check.err, check.target) {
 			t.Errorf("%T does not unwrap to %v", check.err, check.target)
 		}
+	}
+	if err := (&ShutdownError{Cause: context.Canceled}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("ShutdownError does not unwrap to its cause")
 	}
 }
